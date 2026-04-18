@@ -1,47 +1,59 @@
 const express = require('express');
+const admin = require('firebase-admin');
 const app = express();
 
-// הגדרה חשובה כדי שהשרת ידע לקרוא נתונים (JSON) שהסקריפט שולח אליו
 app.use(express.json());
 
-// מסד הנתונים הזמני שלנו (כאן תוכל להוסיף ולערוך רישיונות)
-const licensesDB = {
-    "ABCD-1234-EFGH-5678": { credits: 10, active: true },
-    "XYZ0-9876-WXYZ-5432": { credits: 2, active: true }
-};
+// אתחול Firebase באמצעות משתני סביבה מאובטחים
+if (!admin.apps.length) {
+    admin.initializeApp({
+        credential: admin.credential.cert({
+            projectId: process.env.FIREBASE_PROJECT_ID,
+            clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+            privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        }),
+        databaseURL: process.env.FIREBASE_DATABASE_URL
+    });
+}
 
-// 1. נתיב ראשי לבדיקה - כשתכנס לכתובת דרך הדפדפן תראה את ההודעה הזו
+const db = admin.database();
+
 app.get('/', (req, res) => {
-    res.send('✅ שרת הרישיונות פעיל ומוכן לפעולה!');
+    res.send('✅ שרת הרישיונות מחובר ל-Firebase!');
 });
 
-// 2. הנתיב שהסקריפט מפוטושופ פונה אליו (מאחורי הקלעים) כדי לבדוק רישיון
-app.post('/api/check-license', (req, res) => {
+app.post('/api/check-license', async (req, res) => {
     const { licenseKey } = req.body;
 
-    if (!licensesDB[licenseKey]) {
-        return res.json({ status: "error", message: "רישיון לא קיים במערכת." });
+    try {
+        const ref = db.ref(`licenses/${licenseKey}`);
+        const snapshot = await ref.once('value');
+        const license = snapshot.val();
+
+        if (!license) {
+            return res.json({ status: "error", message: "רישיון לא קיים." });
+        }
+
+        if (!license.active) {
+            return res.json({ status: "error", message: "הרישיון חסום." });
+        }
+
+        if (license.credits <= 0) {
+            return res.json({ status: "expired", message: "נגמרו הקרדיטים." });
+        }
+
+        // עדכון הקרדיטים במסד הנתונים
+        const newCredits = license.credits - 1;
+        await ref.update({ credits: newCredits });
+
+        return res.json({
+            status: "approved",
+            creditsLeft: newCredits
+        });
+
+    } catch (error) {
+        return res.json({ status: "error", message: "שגיאת שרת." });
     }
-
-    const license = licensesDB[licenseKey];
-
-    if (!license.active) {
-        return res.json({ status: "error", message: "הרישיון חסום." });
-    }
-
-    if (license.credits <= 0) {
-        return res.json({ status: "expired", message: "נגמרו הקרדיטים לרישיון זה." });
-    }
-
-    // אם הכל תקין, מורידים קרדיט אחד (הנתון יישמר בזיכרון השרת כל עוד הוא באוויר)
-    license.credits -= 1;
-
-    return res.json({
-        status: "approved",
-        creditsLeft: license.credits,
-        message: "הפעולה אושרה בהצלחה."
-    });
 });
 
-// שינוי קריטי עבור Vercel - אנחנו מייצאים את האפליקציה במקום להפעיל אותה מקומית
 module.exports = app;
